@@ -18,6 +18,7 @@
  */
 
 #include <sdl2/emu_window_sdl2.h>
+#include <sdl2/gl_context_sdl2.h>
 
 #include <common/algorithm.h>
 #include <common/arghandler.h>
@@ -45,10 +46,15 @@
 #include <package/manager.h>
 #include <services/applist/applist.h>
 #include <services/init.h>
+#include <services/window/screen.h>
 #include <services/window/window.h>
+
+#include <drivers/itc.h>
+#include <drivers/input/common.h>
 
 #include <system/devices.h>
 #include <system/epoc.h>
+#include <system/installation/rpkg.h>
 
 #include <utils/apacmd.h>
 #include <vfs/vfs.h>
@@ -89,9 +95,12 @@ namespace eka2l1::sdl {
         std::mutex lockdown;
         std::size_t sys_reset_cbh = 0;
 
+        int present_status = 0;
+
         void stage_one();
         bool stage_two();
         void on_system_reset(system *the_sys);
+        void register_draw_callback();
     };
 
     void emulator_state::stage_one() {
@@ -102,6 +111,39 @@ namespace eka2l1::sdl {
         if (log::filterings) {
             log::filterings->parse_filter_string(conf.log_filter);
         }
+
+        // Controller bindings temporarily disabled for debugging
+#if 0
+        if (conf.keybinds.keybinds.empty()) {
+            auto add_bind = [this](int button_id, std::uint32_t target_scancode) {
+                config::keybind kb;
+                kb.source.type = config::KEYBIND_TYPE_CONTROLLER;
+                kb.source.data.button.controller_id = 0;
+                kb.source.data.button.button_id = button_id;
+                kb.target = target_scancode;
+                conf.keybinds.keybinds.push_back(kb);
+            };
+
+            add_bind(drivers::CONTROLLER_BUTTON_CODE_DPAD_UP, epoc::std_key_up_arrow);
+            add_bind(drivers::CONTROLLER_BUTTON_CODE_DPAD_DOWN, epoc::std_key_down_arrow);
+            add_bind(drivers::CONTROLLER_BUTTON_CODE_DPAD_LEFT, epoc::std_key_left_arrow);
+            add_bind(drivers::CONTROLLER_BUTTON_CODE_DPAD_RIGHT, epoc::std_key_right_arrow);
+            add_bind(drivers::CONTROLLER_BUTTON_CODE_A, epoc::std_key_device_3);
+            add_bind(drivers::CONTROLLER_BUTTON_CODE_B, epoc::std_key_device_1);
+            add_bind(drivers::CONTROLLER_BUTTON_CODE_X, epoc::std_key_enter);
+            add_bind(drivers::CONTROLLER_BUTTON_CODE_Y, epoc::std_key_space);
+            add_bind(drivers::CONTROLLER_BUTTON_CODE_START, epoc::std_key_device_0);
+            add_bind(drivers::CONTROLLER_BUTTON_CODE_BACK, epoc::std_key_device_1);
+            add_bind(drivers::CONTROLLER_BUTTON_CODE_LB, epoc::std_key_nkp_asterisk);
+            add_bind(drivers::CONTROLLER_BUTTON_CODE_RB, epoc::std_key_hash);
+            add_bind(drivers::CONTROLLER_BUTTON_CODE_LT, epoc::std_key_yes);
+            add_bind(drivers::CONTROLLER_BUTTON_CODE_RT, epoc::std_key_no);
+            add_bind(drivers::CONTROLLER_BUTTON_CODE_LEFT_STICK, epoc::std_key_enter);
+            add_bind(drivers::CONTROLLER_BUTTON_CODE_RIGHT_STICK, epoc::std_key_backspace);
+
+            LOG_INFO(FRONTEND_CMDLINE, "Default controller bindings created ({} bindings)", conf.keybinds.keybinds.size());
+        }
+#endif
 
         LOG_INFO(FRONTEND_CMDLINE, "EKA2L1 SDL2 frontend v0.0.1 ({}-{})", GIT_BRANCH, GIT_COMMIT_HASH);
         app_settings = std::make_unique<config::app_settings>(&conf);
@@ -218,7 +260,111 @@ namespace eka2l1::sdl {
             get_winserv_name_by_epocver(symsys->get_symbian_version_use())));
 
         if (stage_two_inited) {
+            register_draw_callback();
             symsys->initialize_user_parties();
+        }
+    }
+
+    static void draw_screen_impl(emulator_state *state, epoc::screen *scr, const bool is_dsa);
+
+    static void draw_screen_callback(void *userdata, epoc::screen *scr, const bool is_dsa) {
+        emulator_state *state = reinterpret_cast<emulator_state *>(userdata);
+        if (!state || !state->graphics_driver) {
+            return;
+        }
+
+        try {
+            draw_screen_impl(state, scr, is_dsa);
+        } catch (const std::exception &e) {
+            LOG_ERROR(FRONTEND_CMDLINE, "draw_screen_callback exception: {}", e.what());
+        }
+    }
+
+    static void draw_screen_impl(emulator_state *state, epoc::screen *scr, const bool is_dsa) {
+        state->graphics_driver->wait_for(&state->present_status);
+
+        drivers::graphics_command_builder builder;
+
+        const auto window_width = state->window->window_fb_size().x;
+        const auto window_height = state->window->window_fb_size().y;
+
+        eka2l1::vec2 swapchain_size(window_width, window_height);
+        builder.bind_bitmap(0);
+        builder.set_swapchain_size(swapchain_size);
+        builder.backup_state();
+
+        builder.set_feature(drivers::graphics_feature::cull, false);
+        builder.set_feature(drivers::graphics_feature::depth_test, false);
+        builder.set_feature(drivers::graphics_feature::blend, false);
+        builder.set_feature(drivers::graphics_feature::stencil_test, false);
+        builder.set_feature(drivers::graphics_feature::clipping, false);
+
+        eka2l1::rect viewport;
+        viewport.size = swapchain_size;
+        builder.set_viewport(viewport);
+
+        builder.clear({ 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f }, drivers::draw_buffer_bit_color_buffer);
+
+        auto &crr_mode = scr->current_mode();
+        eka2l1::vec2 size = crr_mode.size;
+        if ((scr->ui_rotation % 180) != 0) {
+            std::swap(size.x, size.y);
+        }
+
+        float mult_x = static_cast<float>(window_width) / size.x;
+        float mult_y = mult_x;
+        float width = size.x * mult_x;
+        float height = size.y * mult_y;
+
+        if (height > swapchain_size.y) {
+            height = swapchain_size.y;
+            mult_x = mult_y = height / size.y;
+            width = size.x * mult_y;
+        }
+
+        std::uint32_t x = (swapchain_size.x - static_cast<std::uint32_t>(width)) / 2;
+        std::uint32_t y = (swapchain_size.y - static_cast<std::uint32_t>(height)) / 2;
+
+        scr->set_native_scale_factor(state->graphics_driver.get(), mult_x, mult_y);
+        scr->absolute_pos.x = static_cast<int>(x);
+        scr->absolute_pos.y = static_cast<int>(y);
+
+        eka2l1::rect dest;
+        dest.top = eka2l1::vec2(x, y);
+        dest.size = eka2l1::vec2(static_cast<int>(width), static_cast<int>(height));
+
+        eka2l1::rect src;
+        src.size = crr_mode.size;
+        src.size *= scr->display_scale_factor;
+
+        drivers::advance_draw_pos_around_origin(dest, scr->ui_rotation);
+        if (scr->ui_rotation % 180 != 0) {
+            std::swap(dest.size.x, dest.size.y);
+        }
+
+        builder.set_texture_filter(scr->screen_texture, true, drivers::filter_option::linear);
+        builder.set_texture_filter(scr->screen_texture, false, drivers::filter_option::linear);
+
+        builder.draw_bitmap(scr->screen_texture, 0, dest, src, eka2l1::vec2(0, 0),
+            static_cast<float>(scr->ui_rotation), 0);
+
+        builder.load_backup_state();
+
+        state->present_status = -100;
+        builder.present(&state->present_status);
+
+        drivers::command_list retrieved = builder.retrieve_command_list();
+        state->graphics_driver->submit_command_list(retrieved);
+    }
+
+    void emulator_state::register_draw_callback() {
+        if (!winserv)
+            return;
+
+        epoc::screen *screens = winserv->get_screens();
+        while (screens) {
+            screens->add_screen_redraw_callback(this, draw_screen_callback);
+            screens = screens->next;
         }
     }
 
@@ -283,8 +429,21 @@ namespace eka2l1::sdl {
         common::set_thread_name("Graphics thread");
         common::set_thread_priority(common::thread_priority_high);
 
-        state.graphics_driver = drivers::create_graphics_driver(
-            drivers::graphic_api::opengl, state.window->get_window_system_info());
+        auto wsi = state.window->get_window_system_info();
+
+        bool use_gles = false;
+#if defined(__unix__) && !defined(__ANDROID__)
+#if defined(__aarch64__)
+        use_gles = true;
+#else
+        use_gles = (wsi.type == drivers::window_system_type::wayland);
+#endif
+#endif
+
+        auto sdl_gl_ctx = new gl_context_sdl2(state.window->get_sdl_window(), use_gles);
+        wsi.external_gl_context = sdl_gl_ctx;
+
+        state.graphics_driver = drivers::create_graphics_driver(drivers::graphic_api::opengl, wsi);
         state.graphics_driver->update_surface_size(state.window->window_fb_size());
 
         state.window->resize_hook = [](void *userdata, const vec2 &size) {
@@ -300,6 +459,28 @@ namespace eka2l1::sdl {
         });
 
         state.joystick_controller = drivers::new_emu_controller(drivers::controller_type::sdl2);
+        state.joystick_controller->on_button_event = [&state](int jid, int button, bool pressed) {
+            const std::lock_guard<std::mutex> guard(state.lockdown);
+            drivers::input_event evt;
+            evt.type_ = drivers::input_event_type::button;
+            evt.button_.button_ = button;
+            evt.button_.controller_ = jid;
+            evt.button_.state_ = pressed ? drivers::button_state::pressed : drivers::button_state::released;
+            if (state.winserv)
+                state.winserv->queue_input_from_driver(evt);
+        };
+        state.joystick_controller->on_joy_move = [&state](int jid, int button, float axisx, float axisy) {
+            const std::lock_guard<std::mutex> guard(state.lockdown);
+            drivers::input_event evt;
+            evt.type_ = drivers::input_event_type::button;
+            evt.button_.button_ = button;
+            evt.button_.controller_ = jid;
+            evt.button_.axis_[0] = axisx;
+            evt.button_.axis_[1] = axisy;
+            evt.button_.state_ = drivers::button_state::joy;
+            if (state.winserv)
+                state.winserv->queue_input_from_driver(evt);
+        };
         state.joystick_controller->start_polling();
 
         state.graphics_event.set();
@@ -330,12 +511,14 @@ namespace eka2l1::sdl {
                 first_time = false;
             }
 
-            if (success)
+            if (success || state.should_emu_quit)
                 break;
 
             state.init_event.reset();
             state.init_event.wait();
         }
+
+        state.register_draw_callback();
 
         while (!state.should_emu_quit) {
             state.symsys->loop();
@@ -515,11 +698,71 @@ namespace eka2l1::sdl {
         }
 
         auto *emu = reinterpret_cast<emulator_state *>(userdata);
-        if (!emu->symsys->install_package(common::utf8_to_ucs2(path), drive_e)) {
-            *err = "SIS installation failed";
+        int result = emu->symsys->install_package(common::utf8_to_ucs2(path), drive_e);
+        if (result != 0) {
+            *err = "SIS installation failed (error " + std::to_string(result) + ")";
             return false;
         }
+        std::cout << "SIS package installed successfully." << std::endl;
         return true;
+    }
+
+    static bool install_device_handler(common::arg_parser *parser, void *userdata, std::string *err) {
+        const char *rpkg_path = parser->next_token();
+        if (!rpkg_path) {
+            *err = "Usage: --installdevice <RPKG_PATH> <ROM_PATH>";
+            return false;
+        }
+        const char *rom_path = parser->next_token();
+        if (!rom_path) {
+            *err = "Usage: --installdevice <RPKG_PATH> <ROM_PATH>";
+            return false;
+        }
+
+        auto *emu = reinterpret_cast<emulator_state *>(userdata);
+        device_manager *dvcmngr = emu->symsys->get_device_manager();
+
+        const std::string root_z_path = add_path(emu->conf.storage, "drives/z/");
+        const std::string rom_resident_path = add_path(emu->conf.storage, "roms/");
+
+        common::create_directories(root_z_path);
+        common::create_directories(rom_resident_path);
+
+        std::string firmware_code;
+
+        auto progress_cb = [](const std::size_t taken, const std::size_t total) {
+            int pct = static_cast<int>(taken * 100 / total);
+            std::cout << "\rInstalling... " << pct << "%" << std::flush;
+        };
+
+        std::cout << "Installing RPKG: " << rpkg_path << std::endl;
+        device_installation_error error = loader::install_rpkg(dvcmngr, rpkg_path, root_z_path,
+            firmware_code, progress_cb, nullptr);
+        std::cout << std::endl;
+
+        if (error != device_installation_none) {
+            *err = "RPKG installation failed (error " + std::to_string(static_cast<int>(error)) + ")";
+            return false;
+        }
+
+        dvcmngr->save_devices();
+
+        const std::string rom_dir = add_path(emu->conf.storage, add_path("roms", firmware_code + "/"));
+        common::create_directories(rom_dir);
+        const std::string rom_dest = add_path(rom_dir, "SYM.ROM");
+
+        std::cout << "Copying ROM to " << rom_dest << std::endl;
+        if (!common::copy_file(rom_path, rom_dest, true)) {
+            *err = "Failed to copy ROM file";
+            return false;
+        }
+
+        device *dvc = dvcmngr->lastest();
+        if (dvc) {
+            std::cout << "Device installed: " << dvc->model << " (" << dvc->firmware_code << ")" << std::endl;
+        }
+        std::cout << "Done! You can now run the emulator." << std::endl;
+        return false;
     }
 
     static bool mount_card_handler(common::arg_parser *parser, void *userdata, std::string *err) {
@@ -570,6 +813,7 @@ int main(int argc, char *argv[]) {
     parser.add("--app, -a, --run", "Run an app by name, UID (0x...), or virtual path", eka2l1::sdl::app_run_handler);
     parser.add("--device, -dvc", "Set device by firmware code", eka2l1::sdl::device_set_handler);
     parser.add("--install, -i", "Install a SIS package", eka2l1::sdl::install_handler);
+    parser.add("--installdevice", "Install device from RPKG + ROM files", eka2l1::sdl::install_device_handler);
     parser.add("--mount, -m", "Mount a folder/zip as Game Card ROM on E:", eka2l1::sdl::mount_card_handler);
 
     if (argc > 1) {
@@ -579,6 +823,7 @@ int main(int argc, char *argv[]) {
         if (state.should_emu_quit) {
             state.graphics_event.set();
             state.kill_event.set();
+            state.init_event.set();
 
             if (!err.empty())
                 std::cerr << err << std::endl;

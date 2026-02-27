@@ -160,7 +160,7 @@ namespace eka2l1::sdl {
     vec2d emu_window_sdl2::get_mouse_pos() {
         int x = 0, y = 0;
         SDL_GetMouseState(&x, &y);
-        return vec2d(static_cast<double>(x), static_cast<double>(y));
+        return vec2d({ static_cast<double>(x), static_cast<double>(y) });
     }
 
     bool emu_window_sdl2::get_mouse_button_hold(const int mouse_btt) {

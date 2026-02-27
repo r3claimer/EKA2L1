@@ -82,7 +82,11 @@ namespace eka2l1::drivers {
         , index_buffer_current_(0)
         , feature_flags_(0)
         , active_upscale_shader_("Default") {
-        context_ = graphics::make_gl_context(info, false, true);
+        if (info.external_gl_context) {
+            context_.reset(static_cast<graphics::gl_context *>(info.external_gl_context));
+        } else {
+            context_ = graphics::make_gl_context(info, false, true);
+        }
 
         if (!context_) {
             LOG_ERROR(DRIVER_GRAPHICS, "OGL context failed to create!");
@@ -1212,7 +1216,7 @@ namespace eka2l1::drivers {
         }
 
         if (clear_bits & draw_buffer_bit_depth_buffer) {
-#ifdef EKA2L1_PLATFORM_ANDROID
+#if defined(EKA2L1_PLATFORM_ANDROID) || (defined(EKA2L1_PLATFORM_UNIX) && defined(EKA2L1_ARCH_ARM64))
             glClearDepthf(color_to_clear[4]);
 #else
             glClearDepth(color_to_clear[4]);
@@ -1727,7 +1731,9 @@ namespace eka2l1::drivers {
     void ogl_graphics_driver::display(command &cmd) {
         context_->swap_buffers();
 
-        disp_hook_();
+        if (disp_hook_) {
+            disp_hook_();
+        }
         finish(cmd.status_, 0);
     }
 

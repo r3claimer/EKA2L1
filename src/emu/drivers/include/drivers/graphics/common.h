@@ -275,6 +275,10 @@ namespace eka2l1::drivers {
 
         std::uint32_t surface_width = 0;
         std::uint32_t surface_height = 0;
+
+        // If non-null, the graphics driver will use this pre-created GL context
+        // instead of creating its own. Ownership is NOT transferred.
+        void *external_gl_context = nullptr;
     };
 
     using channel_swizzles = std::array<channel_swizzle, 4>;

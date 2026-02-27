@@ -51,6 +51,8 @@ namespace eka2l1::sdl {
 
         drivers::window_system_info get_window_system_info() override;
 
+        SDL_Window *get_sdl_window() { return sdl_window_; }
+
     private:
         SDL_Window *sdl_window_;
         void *userdata_;

@@ -1,6 +1,9 @@
 add_executable(eka2l1_sdl2
     include/sdl2/emu_window_sdl2.h
+    include/sdl2/gl_context_sdl2.h
     src/emu_window_sdl2.cpp
+    src/gl_context_sdl2.cpp
+    src/dialog_driver_sdl2.cpp
     src/main.cpp
 )
 
@@ -20,6 +23,7 @@ target_link_libraries(eka2l1_sdl2 PRIVATE
     stb
     yaml-cpp
     SDL2
+    glad
 )
 
 if (EKA2L1_ENABLE_SCRIPTING_ABILITY)
@@ -63,7 +67,7 @@ add_custom_command(
     COMMAND ${CMAKE_COMMAND} -E copy_if_different "${PROJECT_SOURCE_DIR}/miscs/panic/panic.json" "$<TARGET_FILE_DIR:eka2l1_sdl2>"
     COMMAND ${CMAKE_COMMAND} -E copy_if_different "${PROJECT_SOURCE_DIR}/miscs/utils/leavehook.py" "$<TARGET_FILE_DIR:eka2l1_sdl2>/scripts/disabled/"
     COMMAND ${CMAKE_COMMAND} -E copy_directory "${PROJECT_SOURCE_DIR}/src/scripts/" "$<TARGET_FILE_DIR:eka2l1_sdl2>/scripts/"
-    COMMAND ${CMAKE_COMMAND} -E copy_directory "${PROJECT_SOURCE_DIR}/src/emu/drivers/resources/gl/" "$<TARGET_FILE_DIR:eka2l1_sdl2>/resources/"
+    COMMAND ${CMAKE_COMMAND} -E copy_directory "${PROJECT_SOURCE_DIR}/src/emu/drivers/resources/$<IF:$<STREQUAL:${CMAKE_SYSTEM_PROCESSOR},aarch64>,gles,gl>/" "$<TARGET_FILE_DIR:eka2l1_sdl2>/resources/"
     COMMAND ${CMAKE_COMMAND} -E copy_directory "${PROJECT_SOURCE_DIR}/src/emu/drivers/resources/upscale/" "$<TARGET_FILE_DIR:eka2l1_sdl2>/resources/upscale/"
     COMMAND ${CMAKE_COMMAND} -E copy_if_different "${PROJECT_SOURCE_DIR}/src/emu/drivers/resources/defaultbank.hsb" "$<TARGET_FILE_DIR:eka2l1_sdl2>/resources/"
     COMMAND ${CMAKE_COMMAND} -E copy_if_different "${PROJECT_SOURCE_DIR}/src/emu/drivers/resources/defaultbank.sf2" "$<TARGET_FILE_DIR:eka2l1_sdl2>/resources/"
