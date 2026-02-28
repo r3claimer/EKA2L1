@@ -105,6 +105,14 @@ namespace eka2l1::sdl {
 
         int present_status = 0;
         std::atomic<int> host_rotation{0};
+        std::atomic<bool> show_osd_requested{false};
+
+        std::atomic<bool> osd_visible{false};
+        std::mutex osd_mutex;
+        std::vector<uint8_t> osd_pixels;
+        int osd_w = 0, osd_h = 0;
+        bool osd_texture_dirty = false;
+        drivers::handle osd_texture = 0;
 
         void stage_one();
         bool stage_two();
@@ -360,6 +368,38 @@ namespace eka2l1::sdl {
         builder.draw_bitmap(scr->screen_texture, 0, dest, src, eka2l1::vec2(0, 0),
             static_cast<float>(total_rotation), 0);
 
+        if (state->osd_visible.load() && state->osd_texture != 0) {
+            builder.set_feature(drivers::graphics_feature::blend, true);
+            builder.blend_formula(
+                drivers::blend_equation::add, drivers::blend_equation::add,
+                drivers::blend_factor::frag_out_alpha, drivers::blend_factor::one_minus_frag_out_alpha,
+                drivers::blend_factor::one, drivers::blend_factor::one_minus_frag_out_alpha);
+
+            {
+                const std::lock_guard<std::mutex> guard(state->osd_mutex);
+                if (state->osd_texture_dirty) {
+                    builder.update_bitmap(state->osd_texture,
+                        reinterpret_cast<const char *>(state->osd_pixels.data()),
+                        state->osd_pixels.size(),
+                        eka2l1::vec2(0, 0),
+                        eka2l1::vec2(state->osd_w, state->osd_h));
+                    state->osd_texture_dirty = false;
+                }
+            }
+
+            eka2l1::rect osd_dest;
+            osd_dest.top = eka2l1::vec2(
+                (window_width - state->osd_w) / 2,
+                (window_height - state->osd_h) / 2);
+            osd_dest.size = eka2l1::vec2(state->osd_w, state->osd_h);
+
+            eka2l1::rect osd_src;
+            osd_src.size = eka2l1::vec2(state->osd_w, state->osd_h);
+
+            builder.draw_bitmap(state->osd_texture, 0, osd_dest, osd_src);
+            builder.set_feature(drivers::graphics_feature::blend, false);
+        }
+
         builder.load_backup_state();
 
         state->present_status = -100;
@@ -451,6 +491,11 @@ namespace eka2l1::sdl {
 
         if (key == SDLK_r) {
             emu->host_rotation.store((emu->host_rotation.load() + 90) % 360);
+            return;
+        }
+
+        if (key == SDLK_F5) {
+            emu->show_osd_requested.store(true);
             return;
         }
 
@@ -1065,6 +1110,146 @@ namespace eka2l1::sdl {
         return tex;
     }
 
+    // Render OSD overlay content to an RGBA pixel buffer (CPU-side, no SDL_Renderer).
+    // The graphics thread picks this up in draw_screen_impl and draws it as a GL texture.
+    static void render_osd_pixels(emulator_state &state, TTF_Font *font,
+            int menu_w, int menu_h, int pad, const char *rotate_name) {
+        SDL_Surface *canvas = SDL_CreateRGBSurface(0, menu_w, menu_h, 32,
+            0x000000FF, 0x0000FF00, 0x00FF0000, 0xFF000000);
+        if (!canvas) return;
+
+        SDL_FillRect(canvas, nullptr, SDL_MapRGBA(canvas->format, 0, 0, 0, 180));
+
+        Uint32 white_col = SDL_MapRGBA(canvas->format, 255, 255, 255, 255);
+        SDL_Rect borders[] = {
+            { 0, 0, menu_w, 2 },
+            { 0, menu_h - 2, menu_w, 2 },
+            { 0, 0, 2, menu_h },
+            { menu_w - 2, 0, 2, menu_h }
+        };
+        for (auto &b : borders) SDL_FillRect(canvas, &b, white_col);
+
+        SDL_Color white = { 255, 255, 255, 255 };
+        SDL_Surface *label = TTF_RenderUTF8_Blended(font, "Rotate:", white);
+        if (label) {
+            SDL_SetSurfaceBlendMode(label, SDL_BLENDMODE_BLEND);
+            SDL_Rect dst = { pad, pad, label->w, label->h };
+            SDL_BlitSurface(label, nullptr, canvas, &dst);
+            SDL_FreeSurface(label);
+        }
+
+        char val_buf[32];
+        snprintf(val_buf, sizeof(val_buf), "<  %s  >", rotate_name);
+        SDL_Color green = { 0, 255, 0, 255 };
+        SDL_Surface *val = TTF_RenderUTF8_Blended(font, val_buf, green);
+        if (val) {
+            SDL_SetSurfaceBlendMode(val, SDL_BLENDMODE_BLEND);
+            SDL_Rect dst = { menu_w - pad - val->w, pad, val->w, val->h };
+            SDL_BlitSurface(val, nullptr, canvas, &dst);
+            SDL_FreeSurface(val);
+        }
+
+        {
+            const std::lock_guard<std::mutex> guard(state.osd_mutex);
+            state.osd_w = menu_w;
+            state.osd_h = menu_h;
+            state.osd_pixels.resize(menu_w * menu_h * 4);
+            std::memcpy(state.osd_pixels.data(), canvas->pixels, menu_w * menu_h * 4);
+            state.osd_texture_dirty = true;
+        }
+
+        SDL_FreeSurface(canvas);
+    }
+
+    // OSD settings menu — renders to pixel buffer, drawn by the GL pipeline in draw_screen_impl.
+    void show_osd_menu(emulator_state &state) {
+        static const char *rotate_names[] = { "0", "90", "180", "270" };
+        static const int rotate_values[] = { 0, 90, 180, 270 };
+        static const int ROTATE_COUNT = 4;
+
+        if (TTF_Init() != 0) return;
+
+        SDL_Window *sdl_win = state.window->get_sdl_window();
+        int win_w, win_h;
+        SDL_GetWindowSize(sdl_win, &win_w, &win_h);
+
+        int font_size = std::max(14, win_h / 25);
+        TTF_Font *font = load_launcher_font(font_size);
+        if (!font) { TTF_Quit(); return; }
+
+        int line_h = TTF_FontLineSkip(font) * 3 / 2;
+        int pad = font_size;
+        int menu_w = std::min(win_w * 2 / 3, 500);
+        int menu_h = line_h + pad * 2;
+
+        if (state.osd_texture == 0 || state.osd_w != menu_w || state.osd_h != menu_h) {
+            if (state.osd_texture != 0) {
+                drivers::graphics_command_builder cleanup;
+                cleanup.destroy_bitmap(state.osd_texture);
+                auto cl = cleanup.retrieve_command_list();
+                state.graphics_driver->submit_command_list(cl);
+                state.osd_texture = 0;
+            }
+            state.osd_texture = drivers::create_bitmap(state.graphics_driver.get(),
+                eka2l1::vec2(menu_w, menu_h), 32);
+        }
+
+        if (state.osd_texture == 0) {
+            TTF_CloseFont(font);
+            TTF_Quit();
+            return;
+        }
+
+        int rot_idx = 0;
+        int cur = state.host_rotation.load();
+        for (int i = 0; i < ROTATE_COUNT; i++) {
+            if (rotate_values[i] == cur) { rot_idx = i; break; }
+        }
+
+        render_osd_pixels(state, font, menu_w, menu_h, pad, rotate_names[rot_idx]);
+        state.osd_visible.store(true);
+
+        bool running = true;
+
+        while (running) {
+            SDL_Event ev;
+            while (SDL_PollEvent(&ev)) {
+                if (ev.type == SDL_QUIT) {
+                    state.should_emu_quit.store(true);
+                    running = false;
+                    break;
+                }
+                if (ev.type != SDL_KEYDOWN) continue;
+                switch (ev.key.keysym.sym) {
+                case SDLK_LEFT:
+                    rot_idx = (rot_idx - 1 + ROTATE_COUNT) % ROTATE_COUNT;
+                    state.host_rotation.store(rotate_values[rot_idx]);
+                    render_osd_pixels(state, font, menu_w, menu_h, pad, rotate_names[rot_idx]);
+                    break;
+                case SDLK_RIGHT:
+                    rot_idx = (rot_idx + 1) % ROTATE_COUNT;
+                    state.host_rotation.store(rotate_values[rot_idx]);
+                    render_osd_pixels(state, font, menu_w, menu_h, pad, rotate_names[rot_idx]);
+                    break;
+                case SDLK_F5:
+                case SDLK_ESCAPE:
+                case SDLK_RETURN:
+                case SDLK_KP_ENTER:
+                    running = false;
+                    break;
+                default:
+                    break;
+                }
+            }
+
+            SDL_Delay(16);
+        }
+
+        state.osd_visible.store(false);
+        TTF_CloseFont(font);
+        TTF_Quit();
+    }
+
     bool show_app_launcher(emulator_state &state) {
         kernel_system *kern = state.symsys->get_kernel_system();
         if (!kern) return false;
@@ -1414,6 +1599,12 @@ int main(int argc, char *argv[]) {
 
         while (!state.should_emu_quit && !state.window->should_quit() && !state.app_exited.load()) {
             state.window->poll_events();
+
+            if (state.show_osd_requested.load()) {
+                state.show_osd_requested.store(false);
+                eka2l1::sdl::show_osd_menu(state);
+            }
+
             SDL_Delay(1);
         }
 
