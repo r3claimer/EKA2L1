@@ -9,6 +9,11 @@ add_executable(eka2l1_sdl2
 
 target_include_directories(eka2l1_sdl2 PUBLIC include)
 
+find_library(SDL2_TTF_LIBRARY NAMES SDL2_ttf)
+if (NOT SDL2_TTF_LIBRARY)
+    message(FATAL_ERROR "SDL2_ttf not found")
+endif()
+
 target_link_libraries(eka2l1_sdl2 PRIVATE
     common
     config
@@ -23,6 +28,7 @@ target_link_libraries(eka2l1_sdl2 PRIVATE
     stb
     yaml-cpp
     SDL2
+    ${SDL2_TTF_LIBRARY}
     glad
 )
 

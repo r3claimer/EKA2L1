@@ -164,6 +164,8 @@ endif()
 add_library(miniBAE_EMU STATIC ${MINIBAE_SHARED_SOURCES})
 target_include_directories(miniBAE_EMU
     PRIVATE include/drivers/audio/backend/minibae ${MINIBAE_INTERNAL_INCLUDE_DIRS})
+target_compile_options(miniBAE_EMU PRIVATE
+    -Wno-int-conversion -Wno-incompatible-pointer-types -Wno-int-to-pointer-cast)
 target_link_libraries(miniBAE_EMU PRIVATE common)
 
 target_link_libraries(drivers PRIVATE common cubeb ffmpeg glad glm miniBAE_EMU)

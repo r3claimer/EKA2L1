@@ -54,7 +54,7 @@
 	url = https://github.com/EKA2L1/lunasvg
 [submodule "src/external/mbedtls"]
 	path = src/external/mbedtls
-	url = https://github.com/ARMmbed/mbedtls
+	url = https://github.com/Mbed-TLS/mbedtls
 [submodule "src/external/miniBAE"]
 	path = src/external/miniBAE
 	url = https://github.com/EKA2L1/miniBAE/

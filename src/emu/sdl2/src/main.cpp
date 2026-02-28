@@ -37,7 +37,6 @@
 #include <drivers/audio/audio.h>
 #include <drivers/graphics/graphics.h>
 #include <drivers/input/common.h>
-#include <drivers/input/emu_controller.h>
 #include <drivers/sensor/sensor.h>
 
 #include <kernel/kernel.h>
@@ -68,6 +67,7 @@
 #include <thread>
 
 #include <SDL2/SDL.h>
+#include <SDL2/SDL_ttf.h>
 
 namespace eka2l1::sdl {
     struct emulator_state {
@@ -77,11 +77,11 @@ namespace eka2l1::sdl {
         std::unique_ptr<drivers::sensor_driver> sensor_driver;
         std::unique_ptr<config::app_settings> app_settings;
         std::unique_ptr<emu_window_sdl2> window;
-        drivers::emu_controller_ptr joystick_controller;
 
         std::atomic<bool> should_emu_quit{false};
         std::atomic<bool> should_emu_pause{false};
         std::atomic<bool> stage_two_inited{false};
+        std::atomic<bool> app_exited{false};
 
         bool app_launch_from_command_line = false;
 
@@ -112,38 +112,40 @@ namespace eka2l1::sdl {
             log::filterings->parse_filter_string(conf.log_filter);
         }
 
-        // Controller bindings temporarily disabled for debugging
-#if 0
         if (conf.keybinds.keybinds.empty()) {
-            auto add_bind = [this](int button_id, std::uint32_t target_scancode) {
+            auto add_key = [this](std::uint32_t sdl_keycode, std::uint32_t target_scancode) {
                 config::keybind kb;
-                kb.source.type = config::KEYBIND_TYPE_CONTROLLER;
-                kb.source.data.button.controller_id = 0;
-                kb.source.data.button.button_id = button_id;
+                kb.source.type = config::KEYBIND_TYPE_KEY;
+                kb.source.data.keycode = sdl_keycode;
                 kb.target = target_scancode;
                 conf.keybinds.keybinds.push_back(kb);
             };
 
-            add_bind(drivers::CONTROLLER_BUTTON_CODE_DPAD_UP, epoc::std_key_up_arrow);
-            add_bind(drivers::CONTROLLER_BUTTON_CODE_DPAD_DOWN, epoc::std_key_down_arrow);
-            add_bind(drivers::CONTROLLER_BUTTON_CODE_DPAD_LEFT, epoc::std_key_left_arrow);
-            add_bind(drivers::CONTROLLER_BUTTON_CODE_DPAD_RIGHT, epoc::std_key_right_arrow);
-            add_bind(drivers::CONTROLLER_BUTTON_CODE_A, epoc::std_key_device_3);
-            add_bind(drivers::CONTROLLER_BUTTON_CODE_B, epoc::std_key_device_1);
-            add_bind(drivers::CONTROLLER_BUTTON_CODE_X, epoc::std_key_enter);
-            add_bind(drivers::CONTROLLER_BUTTON_CODE_Y, epoc::std_key_space);
-            add_bind(drivers::CONTROLLER_BUTTON_CODE_START, epoc::std_key_device_0);
-            add_bind(drivers::CONTROLLER_BUTTON_CODE_BACK, epoc::std_key_device_1);
-            add_bind(drivers::CONTROLLER_BUTTON_CODE_LB, epoc::std_key_nkp_asterisk);
-            add_bind(drivers::CONTROLLER_BUTTON_CODE_RB, epoc::std_key_hash);
-            add_bind(drivers::CONTROLLER_BUTTON_CODE_LT, epoc::std_key_yes);
-            add_bind(drivers::CONTROLLER_BUTTON_CODE_RT, epoc::std_key_no);
-            add_bind(drivers::CONTROLLER_BUTTON_CODE_LEFT_STICK, epoc::std_key_enter);
-            add_bind(drivers::CONTROLLER_BUTTON_CODE_RIGHT_STICK, epoc::std_key_backspace);
+            add_key(SDLK_UP, epoc::std_key_up_arrow);
+            add_key(SDLK_DOWN, epoc::std_key_down_arrow);
+            add_key(SDLK_LEFT, epoc::std_key_left_arrow);
+            add_key(SDLK_RIGHT, epoc::std_key_right_arrow);
+            add_key(SDLK_RETURN, epoc::std_key_device_3);     // Enter = OK/Select
+            add_key(SDLK_F1, epoc::std_key_device_0);         // F1 = Left Softkey
+            add_key(SDLK_F2, epoc::std_key_device_1);         // F2 = Right Softkey
+            add_key(SDLK_F3, epoc::std_key_application_0);    // F3 = Green/Call
+            add_key(SDLK_F4, epoc::std_key_application_1);    // F4 = Red/End
+            add_key(SDLK_BACKSPACE, epoc::std_key_backspace);
+            add_key(SDLK_SPACE, epoc::std_key_space);
+            add_key(SDLK_0, '0');
+            add_key(SDLK_1, '1');
+            add_key(SDLK_2, '2');
+            add_key(SDLK_3, '3');
+            add_key(SDLK_4, '4');
+            add_key(SDLK_5, '5');
+            add_key(SDLK_6, '6');
+            add_key(SDLK_7, '7');
+            add_key(SDLK_8, '8');
+            add_key(SDLK_9, '9');
+            add_key(SDLK_ESCAPE, epoc::std_key_no);           // Esc = Red/End key
 
-            LOG_INFO(FRONTEND_CMDLINE, "Default controller bindings created ({} bindings)", conf.keybinds.keybinds.size());
+            LOG_INFO(FRONTEND_CMDLINE, "Default keyboard bindings created ({} bindings)", conf.keybinds.keybinds.size());
         }
-#endif
 
         LOG_INFO(FRONTEND_CMDLINE, "EKA2L1 SDL2 frontend v0.0.1 ({}-{})", GIT_BRANCH, GIT_COMMIT_HASH);
         app_settings = std::make_unique<config::app_settings>(&conf);
@@ -289,7 +291,6 @@ namespace eka2l1::sdl {
         const auto window_height = state->window->window_fb_size().y;
 
         eka2l1::vec2 swapchain_size(window_width, window_height);
-        builder.bind_bitmap(0);
         builder.set_swapchain_size(swapchain_size);
         builder.backup_state();
 
@@ -407,6 +408,7 @@ namespace eka2l1::sdl {
 
     void on_key_press(void *userdata, std::uint32_t key) {
         auto *emu = reinterpret_cast<emulator_state *>(userdata);
+        LOG_INFO(FRONTEND_CMDLINE, "Key pressed: SDL keycode=0x{:X} ({})", key, key);
         auto evt = make_key_event_driver(static_cast<int>(key), drivers::key_state::pressed);
 
         const std::lock_guard<std::mutex> guard(emu->lockdown);
@@ -458,38 +460,12 @@ namespace eka2l1::sdl {
             win->swap_buffer();
         });
 
-        state.joystick_controller = drivers::new_emu_controller(drivers::controller_type::sdl2);
-        state.joystick_controller->on_button_event = [&state](int jid, int button, bool pressed) {
-            const std::lock_guard<std::mutex> guard(state.lockdown);
-            drivers::input_event evt;
-            evt.type_ = drivers::input_event_type::button;
-            evt.button_.button_ = button;
-            evt.button_.controller_ = jid;
-            evt.button_.state_ = pressed ? drivers::button_state::pressed : drivers::button_state::released;
-            if (state.winserv)
-                state.winserv->queue_input_from_driver(evt);
-        };
-        state.joystick_controller->on_joy_move = [&state](int jid, int button, float axisx, float axisy) {
-            const std::lock_guard<std::mutex> guard(state.lockdown);
-            drivers::input_event evt;
-            evt.type_ = drivers::input_event_type::button;
-            evt.button_.button_ = button;
-            evt.button_.controller_ = jid;
-            evt.button_.axis_[0] = axisx;
-            evt.button_.axis_[1] = axisy;
-            evt.button_.state_ = drivers::button_state::joy;
-            if (state.winserv)
-                state.winserv->queue_input_from_driver(evt);
-        };
-        state.joystick_controller->start_polling();
-
         state.graphics_event.set();
         state.graphics_driver->run();
 
         if (state.stage_two_inited)
             state.graphics_event.wait();
 
-        state.joystick_controller->stop_polling();
         state.graphics_driver.reset();
     }
 
@@ -791,6 +767,299 @@ namespace eka2l1::sdl {
         return true;
     }
 
+    static TTF_Font *load_launcher_font(int size) {
+        static const char *font_paths[] = {
+            "/usr/share/fonts/TTF/DejaVuSansMono.ttf",
+            "/usr/share/fonts/liberation/LiberationSans-Regular.ttf",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            "/usr/share/fonts/TTF/DejaVuSans.ttf",
+            "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+            nullptr
+        };
+
+        for (int i = 0; font_paths[i]; i++) {
+            TTF_Font *font = TTF_OpenFont(font_paths[i], size);
+            if (font) {
+                LOG_INFO(FRONTEND_CMDLINE, "Loaded font: {}", font_paths[i]);
+                return font;
+            }
+        }
+        return nullptr;
+    }
+
+    struct launcher_text_cache {
+        SDL_Texture *texture = nullptr;
+        int w = 0;
+        int h = 0;
+    };
+
+    static launcher_text_cache render_text_cached(SDL_Renderer *renderer, TTF_Font *font,
+            const std::string &text, SDL_Color color) {
+        launcher_text_cache result;
+        if (text.empty()) return result;
+
+        SDL_Surface *surface = TTF_RenderUTF8_Blended(font, text.c_str(), color);
+        if (!surface) return result;
+
+        result.texture = SDL_CreateTextureFromSurface(renderer, surface);
+        result.w = surface->w;
+        result.h = surface->h;
+        SDL_FreeSurface(surface);
+        return result;
+    }
+
+    static void draw_text(SDL_Renderer *renderer, TTF_Font *font,
+            const std::string &text, int x, int y, SDL_Color color) {
+        auto cache = render_text_cached(renderer, font, text, color);
+        if (!cache.texture) return;
+
+        SDL_Rect dst = { x, y, cache.w, cache.h };
+        SDL_RenderCopy(renderer, cache.texture, nullptr, &dst);
+        SDL_DestroyTexture(cache.texture);
+    }
+
+    static void draw_text_centered(SDL_Renderer *renderer, TTF_Font *font,
+            const std::string &text, int center_x, int y, SDL_Color color) {
+        auto cache = render_text_cached(renderer, font, text, color);
+        if (!cache.texture) return;
+
+        SDL_Rect dst = { center_x - cache.w / 2, y, cache.w, cache.h };
+        SDL_RenderCopy(renderer, cache.texture, nullptr, &dst);
+        SDL_DestroyTexture(cache.texture);
+    }
+
+    bool show_app_launcher(emulator_state &state) {
+        kernel_system *kern = state.symsys->get_kernel_system();
+        if (!kern) return false;
+
+        applist_server *svr = reinterpret_cast<applist_server *>(
+            kern->get_by_name<service::server>(
+                get_app_list_server_name_by_epocver(kern->get_epoc_version())));
+
+        if (!svr) {
+            LOG_ERROR(FRONTEND_CMDLINE, "App list server not available");
+            return false;
+        }
+
+        auto &regs = svr->get_registerations();
+        if (regs.empty()) {
+            LOG_WARN(FRONTEND_CMDLINE, "No applications installed");
+            return false;
+        }
+
+        struct app_entry {
+            std::string name;
+            std::uint32_t uid;
+            int reg_index;
+        };
+
+        std::vector<app_entry> apps;
+        for (std::size_t i = 0; i < regs.size(); i++) {
+            if (regs[i].caps.is_hidden) continue;
+            if ((regs[i].land_drive == drive_z) && (regs[i].mandatory_info.uid < 0x10300000)) continue;
+
+            app_entry entry;
+            entry.name = common::ucs2_to_utf8(regs[i].mandatory_info.long_caption.to_std_string(nullptr));
+            entry.uid = regs[i].mandatory_info.uid;
+            entry.reg_index = static_cast<int>(i);
+
+            if (entry.name.empty())
+                entry.name = "(UID: 0x" + fmt::format("{:08X}", entry.uid) + ")";
+
+            apps.push_back(std::move(entry));
+        }
+
+        if (apps.empty()) {
+            LOG_WARN(FRONTEND_CMDLINE, "No user applications found");
+            return false;
+        }
+
+        if (TTF_Init() != 0) {
+            LOG_ERROR(FRONTEND_CMDLINE, "TTF_Init failed: {}", TTF_GetError());
+            return false;
+        }
+
+        SDL_Window *win = SDL_CreateWindow("EKA2L1 - App Launcher",
+            SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
+            800, 600, SDL_WINDOW_SHOWN | SDL_WINDOW_FULLSCREEN_DESKTOP);
+
+        if (!win) {
+            LOG_ERROR(FRONTEND_CMDLINE, "Failed to create launcher window: {}", SDL_GetError());
+            TTF_Quit();
+            return false;
+        }
+
+        SDL_Renderer *renderer = SDL_CreateRenderer(win, -1, SDL_RENDERER_SOFTWARE);
+        if (!renderer) {
+            LOG_ERROR(FRONTEND_CMDLINE, "Failed to create renderer: {}", SDL_GetError());
+            SDL_DestroyWindow(win);
+            TTF_Quit();
+            return false;
+        }
+
+        int win_w, win_h;
+        SDL_GetWindowSize(win, &win_w, &win_h);
+
+        int font_size = std::max(16, win_h / 25);
+        TTF_Font *font = load_launcher_font(font_size);
+        TTF_Font *font_small = load_launcher_font(std::max(12, font_size * 3 / 4));
+        TTF_Font *font_title = load_launcher_font(std::max(20, font_size * 5 / 4));
+
+        if (!font) {
+            LOG_ERROR(FRONTEND_CMDLINE, "Failed to load any font for launcher");
+            SDL_DestroyRenderer(renderer);
+            SDL_DestroyWindow(win);
+            TTF_Quit();
+            return false;
+        }
+
+        const SDL_Color color_bg = { 25, 25, 35, 255 };
+        const SDL_Color color_title = { 100, 180, 255, 255 };
+        const SDL_Color color_normal = { 200, 200, 200, 255 };
+        const SDL_Color color_selected_text = { 255, 255, 255, 255 };
+        const SDL_Color color_hint = { 128, 128, 128, 255 };
+        const SDL_Color color_uid = { 160, 160, 160, 255 };
+        const SDL_Color color_highlight = { 50, 80, 140, 255 };
+
+        int line_height = TTF_FontLineSkip(font) + 4;
+        int title_height = font_title ? TTF_FontLineSkip(font_title) + 8 : line_height + 8;
+        int hint_height = font_small ? TTF_FontLineSkip(font_small) + 8 : line_height;
+
+        int list_top = title_height + 20;
+        int list_bottom = win_h - hint_height - 20;
+        int visible_count = (list_bottom - list_top) / line_height;
+        if (visible_count < 1) visible_count = 1;
+
+        int selected = 0;
+        int scroll_offset = 0;
+        bool running = true;
+        bool app_selected = false;
+
+        while (running) {
+            SDL_Event event;
+            while (SDL_PollEvent(&event)) {
+                switch (event.type) {
+                case SDL_QUIT:
+                    running = false;
+                    break;
+                case SDL_KEYDOWN:
+                    switch (event.key.keysym.sym) {
+                    case SDLK_UP:
+                        if (selected > 0) selected--;
+                        break;
+                    case SDLK_DOWN:
+                        if (selected < static_cast<int>(apps.size()) - 1) selected++;
+                        break;
+                    case SDLK_PAGEUP:
+                        selected = std::max(0, selected - visible_count);
+                        break;
+                    case SDLK_PAGEDOWN:
+                        selected = std::min(static_cast<int>(apps.size()) - 1, selected + visible_count);
+                        break;
+                    case SDLK_HOME:
+                        selected = 0;
+                        break;
+                    case SDLK_END:
+                        selected = static_cast<int>(apps.size()) - 1;
+                        break;
+                    case SDLK_RETURN:
+                    case SDLK_KP_ENTER: {
+                        auto &app = apps[selected];
+                        auto &reg = regs[app.reg_index];
+                        epoc::apa::command_line cmd;
+                        cmd.launch_cmd_ = epoc::apa::command_create;
+                        state.app_exited.store(false);
+                        svr->launch_app(reg, cmd, nullptr, [&state](kernel::process*) {
+                            state.app_exited.store(true);
+                        });
+                        app_selected = true;
+                        running = false;
+                        break;
+                    }
+                    case SDLK_ESCAPE:
+                        running = false;
+                        break;
+                    default:
+                        break;
+                    }
+                    break;
+                default:
+                    break;
+                }
+            }
+
+            if (selected < scroll_offset)
+                scroll_offset = selected;
+            if (selected >= scroll_offset + visible_count)
+                scroll_offset = selected - visible_count + 1;
+
+            SDL_SetRenderDrawColor(renderer, color_bg.r, color_bg.g, color_bg.b, 255);
+            SDL_RenderClear(renderer);
+
+            // Title
+            std::string title = "EKA2L1 - Select Application (" + std::to_string(apps.size()) + " apps)";
+            draw_text_centered(renderer, font_title ? font_title : font, title,
+                win_w / 2, 10, color_title);
+
+            // App list
+            int y = list_top;
+            for (int i = scroll_offset; i < static_cast<int>(apps.size()) && i < scroll_offset + visible_count; i++) {
+                bool is_sel = (i == selected);
+
+                if (is_sel) {
+                    SDL_SetRenderDrawColor(renderer, color_highlight.r, color_highlight.g, color_highlight.b, 255);
+                    SDL_Rect highlight_rect = { 10, y - 2, win_w - 20, line_height };
+                    SDL_RenderFillRect(renderer, &highlight_rect);
+                }
+
+                std::string label = std::to_string(i + 1) + ". " + apps[i].name;
+                draw_text(renderer, font, label, 20, y,
+                    is_sel ? color_selected_text : color_normal);
+
+                std::string uid_str = fmt::format("0x{:08X}", apps[i].uid);
+                int uid_w = 0, uid_h = 0;
+                TTF_SizeUTF8(font_small ? font_small : font, uid_str.c_str(), &uid_w, &uid_h);
+                draw_text(renderer, font_small ? font_small : font, uid_str,
+                    win_w - uid_w - 20, y + (line_height - uid_h) / 2, color_uid);
+
+                y += line_height;
+            }
+
+            // Scroll indicator
+            if (static_cast<int>(apps.size()) > visible_count) {
+                int bar_x = win_w - 8;
+                int bar_h = list_bottom - list_top;
+                int thumb_h = std::max(20, bar_h * visible_count / static_cast<int>(apps.size()));
+                int thumb_y = list_top + (bar_h - thumb_h) * scroll_offset / std::max(1, static_cast<int>(apps.size()) - visible_count);
+
+                SDL_SetRenderDrawColor(renderer, 60, 60, 60, 255);
+                SDL_Rect bar_rect = { bar_x, list_top, 6, bar_h };
+                SDL_RenderFillRect(renderer, &bar_rect);
+
+                SDL_SetRenderDrawColor(renderer, 120, 120, 120, 255);
+                SDL_Rect thumb_rect = { bar_x, thumb_y, 6, thumb_h };
+                SDL_RenderFillRect(renderer, &thumb_rect);
+            }
+
+            // Bottom hints
+            draw_text_centered(renderer, font_small ? font_small : font,
+                "Up/Down: Navigate   Enter: Launch   Esc: Quit",
+                win_w / 2, win_h - hint_height - 5, color_hint);
+
+            SDL_RenderPresent(renderer);
+            SDL_Delay(16);
+        }
+
+        if (font_title && font_title != font) TTF_CloseFont(font_title);
+        if (font_small && font_small != font) TTF_CloseFont(font_small);
+        TTF_CloseFont(font);
+        TTF_Quit();
+        SDL_DestroyRenderer(renderer);
+        SDL_DestroyWindow(win);
+
+        return app_selected;
+    }
+
 }  // namespace eka2l1::sdl
 
 int main(int argc, char *argv[]) {
@@ -834,31 +1103,66 @@ int main(int argc, char *argv[]) {
         }
     }
 
-    state.window = std::make_unique<eka2l1::sdl::emu_window_sdl2>();
+    bool first_launch = true;
 
-    state.window->raw_mouse_event = eka2l1::sdl::on_mouse_evt;
-    state.window->button_pressed = eka2l1::sdl::on_key_press;
-    state.window->button_released = eka2l1::sdl::on_key_release;
+    while (true) {
+        if (!state.app_launch_from_command_line || !first_launch) {
+            if (!eka2l1::sdl::show_app_launcher(state)) {
+                break;
+            }
+        }
+        first_launch = false;
 
-    state.window->init("EKA2L1", eka2l1::vec2(800, 600), eka2l1::drivers::emu_window_flag_maximum_size);
-    state.window->set_userdata(&state);
-    state.window->close_hook = [](void *userdata) {
-        auto *s = reinterpret_cast<eka2l1::sdl::emulator_state *>(userdata);
-        eka2l1::sdl::kill_emulator(*s);
-    };
+        state.window = std::make_unique<eka2l1::sdl::emu_window_sdl2>();
 
-    std::thread graphics_thread_obj(eka2l1::sdl::graphics_driver_thread, std::ref(state));
+        state.window->raw_mouse_event = eka2l1::sdl::on_mouse_evt;
+        state.window->button_pressed = eka2l1::sdl::on_key_press;
+        state.window->button_released = eka2l1::sdl::on_key_release;
 
-    // Main thread runs the SDL event loop
-    while (!state.should_emu_quit && !state.window->should_quit()) {
-        state.window->poll_events();
-        SDL_Delay(1);
+        state.window->init("EKA2L1", eka2l1::vec2(800, 600), eka2l1::drivers::emu_window_flag_maximum_size);
+        state.window->set_userdata(&state);
+        state.window->close_hook = [](void *userdata) {
+            auto *s = reinterpret_cast<eka2l1::sdl::emulator_state *>(userdata);
+            s->should_emu_quit.store(true);
+        };
+
+        state.graphics_event.reset();
+        std::thread graphics_thread_obj(eka2l1::sdl::graphics_driver_thread, std::ref(state));
+
+        while (!state.should_emu_quit && !state.window->should_quit() && !state.app_exited.load()) {
+            state.window->poll_events();
+            SDL_Delay(1);
+        }
+
+        bool user_quit = state.should_emu_quit.load() || state.window->should_quit();
+
+        // Pause the OS thread so we can safely tear down graphics
+        state.should_emu_pause.store(true);
+        eka2l1::kernel_system *kern = state.symsys ? state.symsys->get_kernel_system() : nullptr;
+        if (kern)
+            kern->stop_cores_idling();
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
+        // Stop the graphics driver and join its thread
+        if (state.graphics_driver)
+            state.graphics_driver->abort();
+        state.graphics_event.set();
+        graphics_thread_obj.join();
+
+        // Destroy the emulator window
+        state.window.reset();
+
+        // Resume the OS thread
+        state.should_emu_pause.store(false);
+        state.pause_event.set();
+
+        if (user_quit)
+            break;
+
+        state.app_exited.store(false);
     }
 
-    if (!state.should_emu_quit)
-        eka2l1::sdl::kill_emulator(state);
-
-    graphics_thread_obj.join();
+    eka2l1::sdl::kill_emulator(state);
     os_thread_obj.join();
 
     SDL_Quit();

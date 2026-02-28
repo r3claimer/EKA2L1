@@ -1753,7 +1753,9 @@ namespace eka2l1 {
         // Translate host event to guest event
         switch (input_event.type_) {
         case drivers::input_event_type::key:
-        case drivers::input_event_type::key_raw:
+        case drivers::input_event_type::key_raw: {
+            LOG_INFO(SERVICE_WINDOW, "Key event received: code=0x{:X}, state={}, map_size={}", 
+                input_event.key_.code_, static_cast<int>(input_event.key_.state_), input_mapping.key_input_map.size());
             if (make_key_event(input_mapping.key_input_map, input_event, guest_event)) {
                 // NOTE: Current workaround for S80 layout ! Remapping a bit until we figured out
                 // what's best keyboard layout for both PCs and Android...
@@ -1766,13 +1768,18 @@ namespace eka2l1 {
                     }
                 }
 
+                LOG_INFO(SERVICE_WINDOW, "Key mapped: scancode=0x{:X}, event_type={}", 
+                    guest_event.key_evt_.scancode, static_cast<int>(guest_event.type));
                 key_shipper.add_new_event(guest_event);
                 key_shipper.start_shipping();
 
                 shipped = true;
+            } else {
+                LOG_INFO(SERVICE_WINDOW, "Key NOT mapped: code=0x{:X}", input_event.key_.code_);
             }
 
             break;
+        }
 
         case drivers::input_event_type::button:
             if (make_button_event(input_mapping.button_input_map, input_event, guest_event)) {
